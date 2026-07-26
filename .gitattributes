@@ -1,0 +1,19 @@
+# Shell scripts must be checked out with LF endings on every platform.
+#
+# Not cosmetic. Git on Windows checks files out as CRLF by default, and a
+# shell script whose shebang line ends `#!/bin/sh\r` fails to execute on Linux
+# with a "bad interpreter" error. For .githooks/pre-commit that failure mode is
+# specifically bad: the hook silently stops running, and the first sign is a
+# secret in a commit.
+.githooks/** text eol=lf
+*.sh         text eol=lf
+
+# PowerShell is the opposite: CRLF is its native form.
+*.ps1        text eol=crlf
+
+# Never let git rewrite the bytes of a binary or a checksum-bearing file.
+*.pdf   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.tiff  binary

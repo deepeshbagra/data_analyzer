@@ -832,3 +832,49 @@ That is acceptable because they now unlock nothing: local credentials are
 rotated, and the blocklist means those exact strings can never be used again in
 a real environment. Rewriting history was rejected as security theatre for
 placeholder values.
+
+---
+
+## 35. A pre-commit hook, with exact checks and no entropy scanning
+
+**Status:** accepted (Phase 1b hardening), extends #34
+
+`.githooks/pre-commit` refuses a commit that contains an environment file, a
+PEM private key, a provider API credential, or any value currently live in the
+developer's own `.env`. Enabled per clone with
+`git config core.hooksPath .githooks`.
+
+**Why, given `.gitignore` already exists:** `.gitignore` protects against
+forgetting. It does not protect against `git add -f`, against a file named
+`.env.production` that no rule happens to match, or against pasting a working
+password into a README while writing deployment notes. On a public repository
+each of those is an immediate disclosure, and git history is permanent. #34
+made a published credential harmless; this makes publishing one harder.
+
+**Why no generic entropy scanner**, which is the usual implementation: it
+would flag every base64 integrity hash in `web/package-lock.json`. A guard that
+cries wolf teaches the developer to type `--no-verify` by reflex, at which
+point it is worse than nothing, because it also confers a false sense of
+safety. Every check here is exact — a filename pattern, a PEM header, a
+credential prefix with a length floor.
+
+**The check that earns its place** is the last one: comparing staged content
+against the actual values in the developer's `.env`. It needs no heuristic and
+cannot produce a false positive, and it catches the realistic mistake, which is
+not `git add .env` but copying a working value into a file that legitimately
+belongs in the repository.
+
+**Verified by running it**, not by reading it: a `.env.production`, a live
+`JWT_SECRET` pasted into a markdown file, an `AKIA...` key and a PEM header
+were each rejected, and a touched `package-lock.json` was not.
+
+**`.gitattributes` is part of this decision, not incidental.** Git on Windows
+checks files out as CRLF, and a shell script whose shebang ends `#!/bin/sh\r`
+fails to execute on Linux. The hook would silently stop running, and the first
+symptom would be a secret in a commit. The file pins `.githooks/**` to LF, and
+the hook is stored mode 100755 so it is executable when cloned.
+
+**Accepted limits:** `--no-verify` bypasses it, and a hook is per-clone rather
+than enforced centrally. Both are fine — this is a guard against accident, not
+against the repository's own author. Server-side enforcement is push protection
+on GitHub, which is a Phase 4 item.

@@ -107,6 +107,10 @@ change the other.
 | Everything | `.\tasks.ps1 check` | `make check` |
 | psql | `.\tasks.ps1 psql` | `make psql` |
 
+One manual step per clone, because git does not enable hooks automatically:
+`git config core.hooksPath .githooks`. The hook refuses to commit a `.env`, a
+private key, a provider token, or any value live in your own `.env`.
+
 Local endpoints: API `:8000` (`/docs`), web `:3000`, MinIO console `:9001`,
 Postgres `:5432`.
 

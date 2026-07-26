@@ -68,10 +68,28 @@ Requires Docker. `make` is optional — `tasks.ps1` mirrors every target for
 Windows hosts.
 
 ```bash
-cp .env.example .env          # local dev credentials; never commit .env
-make up                       # or: .\tasks.ps1 up
-make test                     # or: .\tasks.ps1 test
+git config core.hooksPath .githooks   # once per clone; see below
+cp .env.example .env                  # then replace every __GENERATE__ value
+make up                               # or: .\tasks.ps1 up
+make test                             # or: .\tasks.ps1 test
 ```
+
+`.env.example` contains no working values. Generate real ones with:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+There are deliberately no defaults. This repository is public, so a default
+here would be a published credential — and a published credential that happens
+to work is one forgotten variable away from a breach. Outside `local` and
+`test` the app refuses to start on a weak or well-known secret, and migration
+0002 refuses to create a database role without one.
+
+The `core.hooksPath` line enables a pre-commit hook that blocks committing a
+`.env` file, a private key, a provider API token, or any value currently live
+in your own `.env`. Git never enables hooks automatically on clone, so this is
+a manual step on each machine.
 
 | Task | make | PowerShell |
 |------|------|-----------|

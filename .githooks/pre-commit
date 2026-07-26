@@ -1,0 +1,101 @@
+#!/bin/sh
+#
+# Refuse commits that would publish a secret.
+#
+# This repository is public, so an accidental `git add -f .env` is not an
+# embarrassment to clean up later -- it is an immediate disclosure, and git
+# history is forever. Same reasoning as DECISIONS #34: the fix for a silent,
+# high-cost mistake is to make it impossible, not to remember not to make it.
+#
+# Enable on a fresh clone (once, per machine):
+#
+#     git config core.hooksPath .githooks
+#
+# Deliberately NOT a generic entropy scanner. Those flag every base64 hash in
+# web/package-lock.json, developers learn to pass --no-verify reflexively, and
+# the guard becomes worse than nothing. Every check below is exact.
+#
+# To bypass when you genuinely mean it: git commit --no-verify
+
+set -e
+
+RED=''
+BOLD=''
+RESET=''
+if [ -t 2 ]; then
+    RED=$(printf '\033[31m')
+    BOLD=$(printf '\033[1m')
+    RESET=$(printf '\033[0m')
+fi
+
+fail() {
+    printf '%s%sBLOCKED: %s%s\n' "$RED" "$BOLD" "$1" "$RESET" >&2
+    shift
+    for line in "$@"; do
+        printf '  %s\n' "$line" >&2
+    done
+    printf '\n  Not a false positive? %sgit commit --no-verify%s\n' "$BOLD" "$RESET" >&2
+    exit 1
+}
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$staged" ] && exit 0
+
+# --- 1. Environment files ---------------------------------------------------
+# .env.example is the one that belongs here; everything else in the family
+# holds real values.
+for path in $staged; do
+    case "$path" in
+        .env.example|*/.env.example) ;;
+        .env|.env.*|*/.env|*/.env.*)
+            fail "$path is an environment file" \
+                 "It holds real credentials. Only .env.example belongs in git." \
+                 "If this file is genuinely safe, rename it to .env.example."
+            ;;
+    esac
+done
+
+# --- 2. Private keys --------------------------------------------------------
+if git diff --cached -U0 -- $staged \
+   | grep -qE '^\+.*-----BEGIN [A-Z ]*PRIVATE KEY-----'; then
+    fail "a private key is being committed" \
+         "Found a PEM private key header in the staged changes."
+fi
+
+# --- 3. Provider credentials ------------------------------------------------
+# Exact prefixes with a length floor, so these cannot match prose.
+if git diff --cached -U0 -- $staged | grep -nE \
+   '^\+.*(AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{60}|sk-ant-[A-Za-z0-9_-]{90}|sk-[A-Za-z0-9]{40})' >&2; then
+    fail "a provider API credential is being committed" \
+         "The line above matches an AWS, GitHub, Anthropic or OpenAI key format."
+fi
+
+# --- 4. This machine's own live secrets -------------------------------------
+# The check that catches the realistic mistake: pasting a working value out of
+# .env into a config file, a test fixture, a README or a docker-compose
+# override. Exact string comparison against the values actually in use, so
+# there is no heuristic and no false positive.
+if [ -f .env ]; then
+    diff_text=$(git diff --cached -U0 -- $staged | grep '^+' || true)
+    while IFS= read -r line; do
+        case "$line" in ''|'#'*) continue ;; esac
+        key=${line%%=*}
+        value=${line#*=}
+        case "$key" in
+            *PASSWORD*|*SECRET*|*KEY*|*TOKEN*) ;;
+            *) continue ;;
+        esac
+        # Ignore short and placeholder values; they are not secrets.
+        [ ${#value} -lt 12 ] && continue
+        [ "$value" = "__GENERATE__" ] && continue
+        case "$diff_text" in
+            *"$value"*)
+                fail "a live secret from your .env is in the staged changes" \
+                     "The value of $key appears in what you are about to commit." \
+                     "Replace it with a placeholder, or read it from the environment."
+                ;;
+        esac
+    done < .env
+fi
+
+exit 0
