@@ -1,0 +1,114 @@
+[project]
+name = "analyzer"
+version = "0.1.0"
+description = "Multi-tenant business document intelligence platform"
+requires-python = ">=3.12,<3.13"
+# Upper bounds are deliberate. Every range here was open-ended until first
+# execution, and the resolver quietly crossed four major versions: redis 5->6,
+# pytest 8->9, mypy 1->2, pytest-cov 6->7. Each ceiling sits one major above
+# what is actually running, so the next major is a decision someone makes rather
+# than something a rebuild does. Exact versions live in constraints.txt;
+# these ranges only say what is *allowed*. See DECISIONS #23.
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.32,<1",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6,<3",
+    "sqlalchemy>=2.0.36,<3",
+    "psycopg[binary]>=3.2,<4",
+    "alembic>=1.14,<2",
+    "celery[redis]>=5.4,<6",
+    "redis>=5.2,<7",
+    "boto3>=1.35,<2",
+    "pyjwt>=2.10,<3",
+    # argon2-cffi and structlog are calendar-versioned; the ceiling is the year
+    # after the one in use, not a semver major.
+    "argon2-cffi>=23.1,<27",
+    "structlog>=24.4,<27",
+    "python-multipart>=0.0.17,<1",
+    # PDF page counting and text-layer detection. Pure Python, no native build,
+    # and it does not rasterise -- rendering is the VLM adapter's problem in 1c.
+    "pypdf>=6.14,<8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<10",
+    "pytest-cov>=6.0,<8",
+    "hypothesis>=6.119,<7",
+    "ruff>=0.8,<1",
+    "mypy>=1.13,<3",
+    "boto3-stubs[s3]>=1.35,<2",
+    "celery-types>=0.22,<1",
+    "httpx>=0.27,<1",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+# Discovery rather than an explicit list. The list version named only the two
+# top-level packages, so `worker.extract` -- and every subpackage a later phase
+# adds -- would be silently absent from a non-editable build. Dev is editable
+# so it would have kept working; the Phase 4 production image would not have.
+# See DECISIONS #24.
+[tool.setuptools.packages.find]
+include = ["api*", "worker*"]
+
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",     # pycodestyle / pyflakes
+    "I",               # import sorting
+    "UP",              # pyupgrade
+    "B",               # bugbear
+    "C4",              # comprehensions
+    "DTZ",             # naive datetime usage
+    "S",               # bandit
+    "RUF",
+    "ANN",             # missing annotations
+    "PL",              # pylint subset
+    "TID",             # tidy imports
+]
+ignore = [
+    "ANN401",  # Any is occasionally correct for jsonb payloads
+    "PLR0913", # matcher/scoring functions legitimately take many weights
+]
+
+[tool.ruff.lint.per-file-ignores]
+# S608 (SQL built by string formatting) is exactly what the isolation tests
+# construct on purpose: they inject a foreign tenant_id to prove RLS holds.
+"tests/**" = ["S101", "S105", "S106", "S608", "ANN201", "PLR2004"]
+"migrations/**" = ["ANN"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# Enforces architecture principle 5: provider SDKs live only in their adapter.
+"decimal.getcontext" = { msg = "Set Decimal context centrally in api.settings, not ad hoc." }
+
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+disallow_any_generics = true
+plugins = ["pydantic.mypy"]
+exclude = ["^migrations/versions/", "^web/"]
+
+[[tool.mypy.overrides]]
+module = ["celery.*", "boto3.*", "botocore.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"
+markers = [
+    "requires_db: test needs a live Postgres with migrations applied",
+    "eval: slow extraction/matching evaluation harness (Phase 1+)",
+]
+filterwarnings = ["error::DeprecationWarning"]

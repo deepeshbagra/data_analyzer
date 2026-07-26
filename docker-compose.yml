@@ -1,0 +1,111 @@
+name: analyzer
+
+x-python-env: &python-env
+  env_file: [.env]
+  environment:
+    PYTHONUNBUFFERED: "1"
+    PYTHONPATH: /app
+  volumes:
+    - ./api:/app/api
+    - ./worker:/app/worker
+    - ./migrations:/app/migrations
+    - ./tests:/app/tests
+    - ./alembic.ini:/app/alembic.ini
+    - ./pyproject.toml:/app/pyproject.toml
+  depends_on:
+    db: {condition: service_healthy}
+    redis: {condition: service_healthy}
+    minio: {condition: service_healthy}
+
+services:
+  db:
+    image: postgres:16-alpine
+    command:
+      - postgres
+      - -c
+      - log_statement=none
+      # RLS is meaningless if the app connects as superuser; keep this visible.
+      - -c
+      - row_security=on
+    env_file: [.env]
+    ports: ["5432:5432"]
+    volumes:
+      - ./.data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes:
+      - ./.data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+    ports: ["9000:9000", "9001:9001"]
+    volumes:
+      - ./.data/minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Creates the document bucket, then exits.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio: {condition: service_healthy}
+    env_file: [.env]
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $${S3_ACCESS_KEY_ID} $${S3_SECRET_ACCESS_KEY} &&
+      mc mb --ignore-existing local/$${S3_BUCKET} &&
+      mc anonymous set none local/$${S3_BUCKET}
+      "
+    restart: "no"
+
+  migrate:
+    <<: *python-env
+    build: {context: ., dockerfile: Dockerfile}
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  api:
+    <<: *python-env
+    build: {context: ., dockerfile: Dockerfile}
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    ports: ["8000:8000"]
+
+  worker:
+    <<: *python-env
+    build: {context: ., dockerfile: Dockerfile}
+    command: ["celery", "-A", "worker.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+
+  web:
+    image: node:22-alpine
+    working_dir: /app
+    command: ["sh", "-c", "npm install && npm run dev"]
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+      WATCHPACK_POLLING: "true"
+    ports: ["3000:3000"]
+    volumes:
+      - ./web:/app
+      - web-node-modules:/app/node_modules
+
+volumes:
+  web-node-modules:

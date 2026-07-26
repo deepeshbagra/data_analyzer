@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+/* Tailwind v4 configures via CSS rather than a JS config file. Design tokens
+   land here in Phase 1 when the review UI arrives. */
+@theme {
+  --color-flagged: oklch(0.72 0.17 55);
+  --color-confident: oklch(0.62 0.14 155);
+}
+
+:root {
+  color-scheme: light dark;
+}
+
+/* The review screen is keyboard-first, so focus must always be visible. */
+:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
