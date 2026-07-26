@@ -770,3 +770,65 @@ the 503, so removing the guard turns the suite red.
 tenant, but every query still runs inside `tenant_session` under `app_rw`, so
 it can only reach that tenant's rows. The header is an authentication gap, not
 an isolation one — which is why a 503 is sufficient rather than a redesign.
+
+---
+
+## 34. No working credential is ever a default
+
+**Status:** accepted (Phase 1b hardening)
+
+The repository is public. Before this change, `.env.example` contained values
+that *worked* — `app_rw_dev_password`, `minioadmin`,
+`change-me-in-every-environment` — and migration 0002 carried the same strings
+as fallbacks when the environment variables were unset.
+
+**Why that combination is the dangerous one:** either half alone is fine. A
+published placeholder that does not work is harmless. A working default that is
+private is merely untidy. Published *and* working means a deployment that
+forgets one environment variable comes up green, passes its health checks, and
+is reachable with a password anyone can read on GitHub. Every failure mode is
+silent, which is the property this project treats as disqualifying (#18, #22,
+#25).
+
+Four changes, in increasing order of durability:
+
+1. **`.env.example` holds `__GENERATE__` placeholders** and the one-liner that
+   generates real values. Copying it without editing produces a configuration
+   that refuses to start.
+2. **Migration 0002 has no password fallback.** An unset, published, short, or
+   quote-containing `APP_*_PASSWORD` raises before any role is created. Loud,
+   early, and trivially fixable — versus a role whose credentials are public.
+3. **`check_secret_strength()` refuses to start** outside `local`/`test` when
+   any secret is on the published blocklist or under 24 characters. The
+   blocklist catches what we thought of; the length floor catches what we did
+   not. The local/test exemption exists because forcing 32-character passwords
+   on a developer's laptop buys nothing and makes onboarding worse.
+4. **Local credentials were rotated** and the volumes destroyed and rebuilt, so
+   nothing running uses a value that was ever published.
+
+**Why the guard is not a pydantic validator.** It was, and that leaked.
+Pydantic appends `input_value={...}` to every `ValidationError`, and the input
+to a settings model is the raw environment — so the guard printed the very
+secrets it existed to protect into the crash log of the one boot that failed
+it. It now raises `WeakSecretError` from plain Python in `get_settings()`,
+where the message is exactly what we wrote. There is a test asserting the error
+names the variable and never its value.
+
+The cost, stated plainly: `Settings(...)` constructed directly no longer
+self-validates. That is why the project rule is that configuration comes from
+`get_settings()`.
+
+**Editing a shipped migration, once.** DECISIONS #16 and #17 say migrations are
+frozen, because re-running an old one against a newer codebase must do what it
+did originally. Changing 0002 breaks that rule. It was done anyway, deliberately
+and once, because 0002 had been applied to exactly one throwaway development
+database and to nothing else, and because the alternative — a 0003 that rotates
+passwords while 0002 keeps creating published ones for every fresh clone — is
+strictly worse. This is the last moment the edit is free. It does not set a
+precedent.
+
+**Not addressed here:** the old values remain in git history and always will.
+That is acceptable because they now unlock nothing: local credentials are
+rotated, and the blocklist means those exact strings can never be used again in
+a real environment. Rewriting history was rejected as security theatre for
+placeholder values.

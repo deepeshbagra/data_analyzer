@@ -79,16 +79,64 @@ RW_TABLES: tuple[str, ...] = tuple(t for t in TENANT_SCOPED_TABLES if t != "audi
 )
 
 
-def _password(env_var: str, fallback: str) -> str:
-    # Local development convenience only. Real environments set these; see
-    # docs/SECURITY.md (Phase 4) for the rotation procedure.
-    return os.environ.get(env_var) or fallback
+#: Values that must never reach a CREATE ROLE. The first three were the
+#: fallbacks this migration used to carry, and they are in this repository's
+#: git history, which is public.
+PUBLISHED_PASSWORDS = frozenset(
+    {
+        "app_rw_dev_password",
+        "app_ro_dev_password",
+        "app_auth_dev_password",
+        "postgres",
+        "password",
+        "changeme",
+        "minioadmin",
+    }
+)
+
+MIN_PASSWORD_LENGTH = 24
+
+
+def _password(env_var: str) -> str:
+    """Read a role password from the environment, or refuse to migrate.
+
+    There is deliberately no fallback. This function used to return
+    ``"app_rw_dev_password"`` when the variable was unset, which meant a
+    deployment that forgot to set it got a working database whose credentials
+    are published in a public repository -- and got it silently, because
+    everything came up green.
+
+    Failing here is loud, happens before any role exists, and is trivially
+    fixable. Same reasoning as DECISIONS #18 and #22: a fallback that can only
+    convert a loud failure into a quiet wrong answer is not a safety net.
+    """
+    value = os.environ.get(env_var, "").strip()
+    if not value:
+        raise RuntimeError(
+            f"{env_var} is not set. Copy .env.example to .env and generate a value; "
+            f"this migration has no default because a default here would be a "
+            f"published credential."
+        )
+    if value in PUBLISHED_PASSWORDS:
+        raise RuntimeError(
+            f"{env_var} is a known published value. Generate a fresh one: "
+            f"python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+        )
+    if len(value) < MIN_PASSWORD_LENGTH:
+        raise RuntimeError(
+            f"{env_var} is shorter than {MIN_PASSWORD_LENGTH} characters."
+        )
+    if "'" in value or "\\" in value:
+        # These are interpolated into CREATE ROLE ... PASSWORD '...'. A quote
+        # would break out of the literal.
+        raise RuntimeError(f"{env_var} must not contain a quote or a backslash.")
+    return value
 
 
 def upgrade() -> None:
-    app_rw_pw = _password("APP_RW_PASSWORD", "app_rw_dev_password")
-    app_ro_pw = _password("APP_RO_PASSWORD", "app_ro_dev_password")
-    app_auth_pw = _password("APP_AUTH_PASSWORD", "app_auth_dev_password")
+    app_rw_pw = _password("APP_RW_PASSWORD")
+    app_ro_pw = _password("APP_RO_PASSWORD")
+    app_auth_pw = _password("APP_AUTH_PASSWORD")
 
     # --- Tenant context accessors -------------------------------------------
     # STABLE, not IMMUTABLE: the value is fixed within a statement but changes

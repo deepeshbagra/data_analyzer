@@ -27,6 +27,11 @@ web/next-env.d.ts
 # Local infra volumes
 .data/
 
+# Session working notes. Deliberately untracked: it is candid internal state
+# (open bugs, what is unverified, what to do next) and the repo is public.
+# It stays on disk so a new session can resume from it.
+docs/HANDOFF.md
+
 # Fixtures that may contain real customer documents
 tests/fixtures/private/
 

@@ -22,6 +22,49 @@ decimal.DefaultContext.rounding = decimal.ROUND_HALF_UP
 decimal.setcontext(decimal.DefaultContext)
 
 
+#: Environments where a weak or published secret is tolerated, because nothing
+#: is reachable from outside the developer's machine.
+DEVELOPMENT_ENVIRONMENTS = frozenset({"local", "test"})
+
+#: Secrets that are published in this repository's git history, plus the usual
+#: suspects. None of these may be used anywhere real.
+PUBLISHED_SECRETS = frozenset(
+    {
+        "postgres",
+        "app_rw_dev_password",
+        "app_ro_dev_password",
+        "app_auth_dev_password",
+        "minioadmin",
+        "change-me-in-every-environment",
+        "changeme",
+        "change-me",
+        "password",
+        "secret",
+        "admin",
+        "__GENERATE__",
+    }
+)
+
+MIN_SECRET_LENGTH = 24
+
+
+def _dsn_password(dsn: PostgresDsn | None) -> str | None:
+    """The password out of a DSN.
+
+    Pydantic v2 models ``PostgresDsn`` as a multi-host URL, so the credentials
+    live in ``hosts()`` rather than on the object. Reaching for ``.password``
+    raises ``AttributeError`` -- which, in a validator, would have surfaced as
+    a confusing config error rather than as "your secret is weak".
+    """
+    if dsn is None:
+        return None
+    hosts = dsn.hosts()
+    if not hosts:
+        return None
+    password = hosts[0].get("password")
+    return password if password else None
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -78,11 +121,80 @@ class Settings(BaseSettings):
     jwt_refresh_ttl_seconds: int = Field(default=2_592_000, ge=3600)
 
 
+class WeakSecretError(RuntimeError):
+    """A secret is published, well-known, or too short for a real environment."""
+
+
+def check_secret_strength(settings: Settings) -> None:
+    """Refuse a configuration whose secrets are published or trivially weak.
+
+    The same shape as the superuser check in ``GET /ready``: make the dangerous
+    configuration impossible to run rather than documented as something not to
+    do. It exists because ``.env.example`` is public and, until this guard,
+    held values that actually worked -- a published credential that is also a
+    functioning default is one forgotten environment variable away from a live
+    database anyone can open. Every failure mode is silent: the app starts, the
+    tests pass, nothing looks wrong.
+
+    **Not a pydantic validator, deliberately.** It was one, and that leaked.
+    Pydantic appends ``input_value={...}`` to every ``ValidationError``, and
+    the input to a settings model is the raw environment -- so a guard whose
+    entire purpose is protecting secrets printed them into the crash log of the
+    one boot that failed it. Raising from plain Python keeps the message to
+    exactly what is written below.
+
+    Raises:
+        WeakSecretError: naming the offending variables and never their values.
+    """
+    if settings.environment in DEVELOPMENT_ENVIRONMENTS:
+        return
+
+    candidates: list[tuple[str, str | None]] = [
+        ("JWT_SECRET", settings.jwt_secret.get_secret_value()),
+        ("S3_SECRET_ACCESS_KEY", settings.s3_secret_access_key.get_secret_value()),
+        ("S3_ACCESS_KEY_ID", settings.s3_access_key_id.get_secret_value()),
+        ("DATABASE_URL", _dsn_password(settings.database_url)),
+        ("DATABASE_ADMIN_URL", _dsn_password(settings.database_admin_url)),
+        ("DATABASE_RO_URL", _dsn_password(settings.database_ro_url)),
+        ("DATABASE_AUTH_URL", _dsn_password(settings.database_auth_url)),
+    ]
+
+    published = sorted({n for n, v in candidates if v and v in PUBLISHED_SECRETS})
+    short = sorted(
+        {
+            n
+            for n, v in candidates
+            if v and v not in PUBLISHED_SECRETS and len(v) < MIN_SECRET_LENGTH
+        }
+    )
+
+    problems: list[str] = []
+    if published:
+        problems.append(f"published or well-known value: {', '.join(published)}")
+    if short:
+        problems.append(f"shorter than {MIN_SECRET_LENGTH} characters: {', '.join(short)}")
+    if problems:
+        raise WeakSecretError(
+            f"refusing to start in environment {settings.environment!r} -- "
+            + "; ".join(problems)
+            + '. Generate replacements with `python -c "import secrets; '
+            'print(secrets.token_urlsafe(32))"`.'
+        )
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Process-wide singleton. Cached so ``.env`` is parsed once."""
+    """Process-wide singleton. Cached so ``.env`` is parsed once.
+
+    Secret strength is checked here rather than on the model so that a failure
+    carries our message and nothing else. Anything constructing ``Settings``
+    directly bypasses it -- which is why the project rule is that config comes
+    from this function.
+    """
     # No arguments: every field is populated from the environment or .env by
     # pydantic-settings. This used to carry a `type: ignore[call-arg]`; the
     # pydantic mypy plugin now models BaseSettings correctly, so strict mode
     # flags that ignore as unused.
-    return Settings()
+    settings = Settings()
+    check_secret_strength(settings)
+    return settings
